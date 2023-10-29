@@ -1,297 +1,384 @@
 #include <gtk/gtk.h>
 
-struct ss_config {
-	double seg_wt, border_wt;
-	double on_r, on_g, on_b;
-	double off_r, off_g, off_b;
-	double label_r, label_g, label_b;
-	int __height, __width, __seg_len;
+#define DISPLAY_WIDTH  1920
+#define DISPLAY_HEIGHT 1080
+
+struct rgb {
+	double r, g, b;
+};
+
+struct ss_colors {
+	struct rgb on, off;
+};
+
+struct ss_geometry {
+	double seg_wt, border_wt, seg_len;
+};
+
+struct ss_colon {
+	GtkWidget *drawing_area;
+	const struct ss_geometry *geometry;
+	const struct rgb *color;
+};
+
+struct ss_digit {
+	GtkWidget *drawing_area;
+	const struct ss_geometry *geometry;
+	const struct ss_colors *colors;
+	int value;
+};
+
+struct text_config {
 	int text_pt;
 };
 
-static struct ss_config utc_clock_config = { .seg_wt = 25,
-					     .border_wt = 5,
-					     .on_r = 1,
-					     .on_g = 0,
-					     .on_b = 0,
-					     .off_r = 0.2,
-					     .off_g = 0,
-					     .off_b = 0,
-					     .text_pt = 52,
-					     .label_r = 1,
-					     .label_g = 1,
-					     .label_b = 1 };
+static struct config {
+	struct text_config labels;
+	struct ss_colors c_utc, c_local;
+	double seg_wt, border_wt;
+} app_config = { .labels = { .text_pt = 1024 * 48 },
+		 .c_utc = { { 1, 0, 0 }, { 0.1, 0, 0 } },
+		 .c_local = { { 0, 0, 1 }, { 0, 0, 0.1 } },
+		 .seg_wt = 25,
+		 .border_wt = 5 };
 
-static struct ss_config local_clock_config = { .seg_wt = 25,
-					       .border_wt = 5,
-					       .on_r = 0,
-					       .on_g = 0,
-					       .on_b = 1,
-					       .text_pt = 52,
-					       .off_r = 0,
-					       .off_g = 0,
-					       .off_b = 0.1,
-					       .label_r = 1,
-					       .label_g = 1,
-					       .label_b = 1 };
+struct ss_clock {
+	struct ss_digit *digits[6];
+	struct ss_colon *colons[2];
+};
+
+struct time_info {
+	int utc_h, utc_m, utc_s;
+	int local_h, local_m, local_s;
+	int utc_offset;
+};
+
+struct clockapp {
+	GtkWidget *grid;
+	GtkWidget *l_utc, *l_local, *l_hours, *l_minutes, *l_seconds;
+	struct ss_clock utc, local;
+	struct ss_geometry geometry;
+	int prev_utc_offset;
+};
 
 static int sevenseg_vals[10] = { 0b1110111, 0b0010010, 0b1011101, 0b1011011,
 				 0b0111010, 0b1101011, 0b1101111, 0b1010010,
 				 0b1111111, 0b1111011 };
 
-static void draw_h_seg(cairo_t *cr, double x0, double y0, int on,
-		       const struct ss_config *conf)
+static void draw_h_seg(cairo_t *cr, int on, const struct ss_digit *conf)
 {
-	cairo_move_to(cr, x0, y0);
-	cairo_rel_line_to(cr, conf->seg_wt, -1 * conf->seg_wt);
-	cairo_rel_line_to(cr, conf->__seg_len, 0);
-	cairo_rel_line_to(cr, conf->seg_wt, conf->seg_wt);
-	cairo_rel_line_to(cr, -1 * conf->seg_wt, conf->seg_wt);
-	cairo_rel_line_to(cr, -1 * conf->__seg_len, 0);
+	cairo_rel_line_to(cr, conf->geometry->seg_wt,
+			  -1 * conf->geometry->seg_wt);
+	cairo_rel_line_to(cr, conf->geometry->seg_len, 0);
+	cairo_rel_line_to(cr, conf->geometry->seg_wt, conf->geometry->seg_wt);
+	cairo_rel_line_to(cr, -1 * conf->geometry->seg_wt,
+			  conf->geometry->seg_wt);
+	cairo_rel_line_to(cr, -1 * conf->geometry->seg_len, 0);
 	cairo_close_path(cr);
 
-	cairo_set_line_width(cr, conf->border_wt);
-	if (on)
-		cairo_set_source_rgb(cr, conf->on_r, conf->on_g, conf->on_b);
-	else
-		cairo_set_source_rgb(cr, conf->off_r, conf->off_g, conf->off_b);
+	const struct rgb *fill = on ? &conf->colors->on : &conf->colors->off;
+
+	cairo_set_line_width(cr, conf->geometry->border_wt);
+	cairo_set_source_rgb(cr, fill->r, fill->g, fill->b);
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_stroke(cr);
 }
 
-static void draw_v_seg(cairo_t *cr, double x0, double y0, int on,
-		       const struct ss_config *conf)
+static void draw_v_seg(cairo_t *cr, int on, const struct ss_digit *conf)
 {
-	cairo_move_to(cr, x0, y0);
-	cairo_rel_line_to(cr, conf->seg_wt, conf->seg_wt);
-	cairo_rel_line_to(cr, 0, conf->__seg_len);
-	cairo_rel_line_to(cr, -1 * conf->seg_wt, conf->seg_wt);
-	cairo_rel_line_to(cr, -1 * conf->seg_wt, -1 * conf->seg_wt);
-	cairo_rel_line_to(cr, 0, -1 * conf->__seg_len);
+	cairo_rel_line_to(cr, conf->geometry->seg_wt, conf->geometry->seg_wt);
+	cairo_rel_line_to(cr, 0, conf->geometry->seg_len);
+	cairo_rel_line_to(cr, -1 * conf->geometry->seg_wt,
+			  conf->geometry->seg_wt);
+	cairo_rel_line_to(cr, -1 * conf->geometry->seg_wt,
+			  -1 * conf->geometry->seg_wt);
+	cairo_rel_line_to(cr, 0, -1 * conf->geometry->seg_len);
 	cairo_close_path(cr);
 
-	cairo_set_line_width(cr, conf->border_wt);
-	if (on)
-		cairo_set_source_rgb(cr, conf->on_r, conf->on_g, conf->on_b);
-	else
-		cairo_set_source_rgb(cr, conf->off_r, conf->off_g, conf->off_b);
+	const struct rgb *fill = on ? &conf->colors->on : &conf->colors->off;
+
+	cairo_set_line_width(cr, conf->geometry->border_wt);
+	cairo_set_source_rgb(cr, fill->r, fill->g, fill->b);
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_stroke(cr);
 }
 
-static void draw_full_seven_seg(cairo_t *cr, double x0, double y0, int value,
-				const struct ss_config *conf)
+static void ss_digit_draw(GtkDrawingArea *area, cairo_t *cr, int width,
+			  int height, gpointer data)
 {
-	value %= 10;
+	const struct ss_digit *conf = data;
+	int value = conf->value % 10;
 
 	int mask = sevenseg_vals[value];
+	double total_seg_len =
+		conf->geometry->seg_len + 2 * conf->geometry->seg_wt;
 
-	draw_h_seg(cr, x0 + conf->seg_wt, y0 + conf->seg_wt, mask & 64, conf);
-	draw_v_seg(cr, x0 + conf->seg_wt, y0 + conf->seg_wt, mask & 32, conf);
-	draw_v_seg(cr, x0 + conf->__seg_len + 3 * conf->seg_wt,
-		   y0 + conf->seg_wt, mask & 16, conf);
-	draw_h_seg(cr, x0 + conf->seg_wt,
-		   y0 + conf->__seg_len + conf->seg_wt * 3, mask & 8, conf);
-	draw_v_seg(cr, x0 + conf->seg_wt,
-		   y0 + conf->__seg_len + conf->seg_wt * 3, mask & 4, conf);
-	draw_v_seg(cr, x0 + conf->__seg_len + 3 * conf->seg_wt,
-		   y0 + conf->__seg_len + 3 * conf->seg_wt, mask & 2, conf);
-	draw_h_seg(cr, x0 + conf->seg_wt,
-		   y0 + conf->__seg_len * 2 + conf->seg_wt * 5, mask & 1, conf);
+	cairo_move_to(cr, conf->geometry->seg_wt, conf->geometry->seg_wt);
+	draw_h_seg(cr, mask & 64, conf);
+	cairo_move_to(cr, conf->geometry->seg_wt, conf->geometry->seg_wt);
+	draw_v_seg(cr, mask & 32, conf);
+	cairo_move_to(cr, conf->geometry->seg_wt + total_seg_len,
+		      conf->geometry->seg_wt);
+	draw_v_seg(cr, mask & 16, conf);
+	cairo_move_to(cr, conf->geometry->seg_wt,
+		      conf->geometry->seg_wt + total_seg_len);
+	draw_h_seg(cr, mask & 8, conf);
+	cairo_move_to(cr, conf->geometry->seg_wt,
+		      conf->geometry->seg_wt + total_seg_len);
+	draw_v_seg(cr, mask & 4, conf);
+	cairo_move_to(cr, conf->geometry->seg_wt + total_seg_len,
+		      conf->geometry->seg_wt + total_seg_len);
+	draw_v_seg(cr, mask & 2, conf);
+	cairo_move_to(cr, conf->geometry->seg_wt,
+		      conf->geometry->seg_wt + 2 * total_seg_len);
+	draw_h_seg(cr, mask & 1, conf);
 }
 
-static void draw_colon_box(cairo_t *cr, double x0, double y0, int on,
-			   const struct ss_config *conf)
+static void draw_colon_box(cairo_t *cr, const struct ss_colon *conf)
 {
-	cairo_move_to(cr, x0, y0);
-	cairo_rel_line_to(cr, conf->seg_wt, 0);
-	cairo_rel_line_to(cr, 0, conf->seg_wt);
-	cairo_rel_line_to(cr, -1 * conf->seg_wt, 0);
+	cairo_rel_line_to(cr, conf->geometry->seg_wt, 0);
+	cairo_rel_line_to(cr, 0, conf->geometry->seg_wt);
+	cairo_rel_line_to(cr, -1 * conf->geometry->seg_wt, 0);
 	cairo_close_path(cr);
 
-	cairo_set_line_width(cr, conf->border_wt);
-	if (1)
-		cairo_set_source_rgb(cr, conf->on_r, conf->on_g, conf->on_b);
-	else
-		cairo_set_source_rgb(cr, conf->off_r, conf->off_g, conf->off_b);
+	cairo_set_line_width(cr, conf->geometry->border_wt);
+	cairo_set_source_rgb(cr, conf->color->r, conf->color->g,
+			     conf->color->b);
 	cairo_fill_preserve(cr);
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_stroke(cr);
 }
 
-static void draw_colon(cairo_t *cr, double x0, double y0, int on,
-		       const struct ss_config *conf)
+static void ss_colon_draw(GtkDrawingArea *area, cairo_t *cr, int width,
+			  int height, gpointer data)
 {
-	draw_colon_box(cr, x0, y0 + (0.8 * conf->__seg_len) - conf->seg_wt, on,
-		       conf);
-	draw_colon_box(cr, x0,
-		       y0 + conf->__height - (0.8 * conf->__seg_len) -
-			       conf->seg_wt,
-		       on, conf);
+	struct ss_colon *conf = data;
+
+	cairo_move_to(cr, 0,
+		      conf->geometry->seg_len - conf->geometry->seg_wt / 2);
+	draw_colon_box(cr, conf);
+	cairo_move_to(cr, 0,
+		      conf->geometry->seg_len + 5.5 * conf->geometry->seg_wt);
+	draw_colon_box(cr, conf);
 }
 
-static void draw_centered_text(cairo_t *cr, const char *text, double cx,
-			       double ty, const struct ss_config *conf)
+static void get_time_info(struct time_info *info)
 {
-	cairo_text_extents_t extents;
+	GDateTime *utc, *local;
+	GTimeSpan utc_difference;
 
-	cairo_text_extents(cr, text, &extents);
+	utc = g_date_time_new_now_utc();
+	info->utc_h = g_date_time_get_hour(utc);
+	info->utc_m = g_date_time_get_minute(utc);
+	info->utc_s = g_date_time_get_second(utc);
 
-	double x = cx - (extents.width / 2 + extents.x_bearing);
-	double y = ty - extents.y_bearing;
+	local = g_date_time_new_now_local();
+	info->local_h = g_date_time_get_hour(local);
+	info->local_m = g_date_time_get_minute(local);
+	info->local_s = g_date_time_get_second(local);
 
-	cairo_move_to(cr, x, y);
-	cairo_set_source_rgb(cr, conf->label_r, conf->label_g, conf->label_b);
-	cairo_show_text(cr, text);
+	utc_difference = g_date_time_difference(utc, local);
+	info->utc_offset = g_date_time_get_utc_offset(local) / 3600000000LL;
+
+	g_date_time_unref(utc);
+	g_date_time_unref(local);
 }
 
-static void draw_clock(cairo_t *cr, double y0, int h, int m, int s,
-		       const struct ss_config *conf)
+static void update_clock_widgets(struct ss_digit *digits[6], int h, int m,
+				 int s)
 {
-	double x =
-		(conf->__width - 33 * conf->seg_wt - 6 * conf->__seg_len) / 2;
-	double ss_width = conf->__seg_len + 5 * conf->seg_wt;
+	int vals[] = { h / 10, h % 10, m / 10, m % 10, s / 10, s % 10 };
 
-	draw_full_seven_seg(cr, x, y0, h / 10, conf);
-	x += ss_width;
-	draw_full_seven_seg(cr, x, y0, h % 10, conf);
-	x += ss_width;
-
-	draw_colon(cr, x, y0, 1, conf);
-	x += 2 * conf->seg_wt;
-
-	draw_full_seven_seg(cr, x, y0, m / 10, conf);
-	x += ss_width;
-	draw_full_seven_seg(cr, x, y0, m % 10, conf);
-	x += ss_width;
-
-	draw_colon(cr, x, y0, 1, conf);
-	x += 2 * conf->seg_wt;
-
-	draw_full_seven_seg(cr, x, y0, s / 10, conf);
-	x += ss_width;
-	draw_full_seven_seg(cr, x, y0, s % 10, conf);
-	x += ss_width;
+	for (int i = 0; i < 6; i++) {
+		if (1 /*digits[i]->value != vals[i]*/) {
+			digits[i]->value = vals[i];
+			gtk_widget_queue_draw(digits[i]->drawing_area);
+		}
+	}
 }
 
-static void draw_hms_labels(cairo_t *cr, double y0,
-			      const struct ss_config *conf)
+static const char *utc_offset_to_str(int offset)
 {
-	double center = conf->__width / 2;
-	double offset = 12 * conf->seg_wt + 2 * conf->__seg_len;
-
-	draw_centered_text(cr, "HOURS", center - offset, y0, conf);
-	draw_centered_text(cr, "MINUTES", center, y0, conf);
-	draw_centered_text(cr, "SECONDS", center + offset, y0, conf);
+	switch (offset) {
+	case -5:
+		return "CENTRAL DAYLIGHT";
+	case -6:
+		return "CENTRAL STANDARD";
+	default:
+		return "LOCAL";
+	}
 }
 
-struct time_info {
-    int utc_h, utc_m, utc_s;
-    int local_h, local_m, local_s;
-    int utc_offset;
-};
+static gboolean update_clock(gpointer data)
+{
+	struct clockapp *app = data;
+	struct time_info tinfo;
 
-static void get_time_info(struct time_info *info) {
-    GDateTime *utc, *local;
-    GTimeSpan utc_difference;
+	get_time_info(&tinfo);
 
-    utc = g_date_time_new_now_utc();
-    info->utc_h = g_date_time_get_hour(utc);
-    info->utc_m = g_date_time_get_minute(utc);
-    info->utc_s = g_date_time_get_second(utc);
+	update_clock_widgets(app->utc.digits, tinfo.utc_h, tinfo.utc_m,
+			     tinfo.utc_s);
+	update_clock_widgets(app->local.digits, tinfo.local_h, tinfo.local_m,
+			     tinfo.local_s);
 
-    local = g_date_time_new_now_local();
-    info->local_h = g_date_time_get_hour(local);
-    info->local_m = g_date_time_get_minute(local);
-    info->local_s = g_date_time_get_second(local);
+	if (app->prev_utc_offset != tinfo.utc_offset) {
+		app->prev_utc_offset = tinfo.utc_offset;
 
-    utc_difference = g_date_time_difference(utc, local);
-    info->utc_offset = g_date_time_get_utc_offset(local) / 3600000000LL;
+		GString *str = g_string_new("");
+		g_string_printf(
+			str, "<span size=\"%d\">%s TIME (UTC%c%u)</span>",
+			app_config.labels.text_pt,
+			utc_offset_to_str(tinfo.utc_offset),
+			tinfo.utc_offset < 0 ? '-' : '+',
+			tinfo.utc_offset * (tinfo.utc_offset < 0 ? -1 : 1));
 
-    g_date_time_unref(utc);
-    g_date_time_unref(local);
+		g_string_free(str, true);
+	}
+
+	GDateTime *now = g_date_time_new_now_utc();
+	int millis = g_date_time_get_microsecond(now) / 1000;
+	int to_go = 1000 - millis + 1;
+	// 1ms buffer makes sure we are squarely in the next second next time we update
+	// nobody will notice
+
+	g_timeout_add(to_go, update_clock, app);
+
+	return FALSE;
 }
 
-static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
-		 gpointer data)
+static struct ss_colon *ss_colon_create(const struct ss_geometry *geometry,
+					const struct rgb *color)
 {
-    cairo_text_extents_t title_extents, hms_extents, local_extents;
-	double y_offset, x_offset;
-	struct ss_config *conf = &utc_clock_config;
-    GDateTime *utc = g_date_time_new_now_utc(), *local = g_date_time_new_now_local();
-	conf->__width = width;
-    GString *localtime_label = g_string_new("");
+	struct ss_colon *colon = malloc(sizeof(*colon));
 
-	cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-			       CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_font_size(cr, conf->text_pt);
+	colon->geometry = geometry;
+	colon->color = color;
 
-    struct time_info tinfo;
-    get_time_info(&tinfo);
+	colon->drawing_area = gtk_drawing_area_new();
+	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(colon->drawing_area),
+				       ss_colon_draw, colon, NULL);
+	gtk_drawing_area_set_content_height(
+		GTK_DRAWING_AREA(colon->drawing_area),
+		2 * geometry->seg_len + 6 * geometry->seg_wt);
+	gtk_drawing_area_set_content_width(
+		GTK_DRAWING_AREA(colon->drawing_area), geometry->seg_wt);
 
-    g_string_printf(localtime_label, "%s TIME (UTC %d)", tinfo.utc_offset == -6 ? "CENTRAL STANDARD" : tinfo.utc_offset == -5 ? "CENTRAL DAYLIGHT" : "LOCAL", tinfo.utc_offset);
-
-    cairo_text_extents(cr, "COORDINATED UNIVERSAL TIME", &title_extents);
-    cairo_text_extents(cr, "HOURS MINUTES SECONDS", &hms_extents);
-    cairo_text_extents(cr, localtime_label->str, &local_extents);
-
-    conf->__height = (height - title_extents.height - hms_extents.height - local_extents.height - 6 * conf->seg_wt) / 2;
-
-    int v_len = (conf->__height / 2) - (conf->seg_wt * 3);
-    int h_len = (conf->__width - 35 * conf->seg_wt) / 6;
-	conf->__seg_len = h_len < v_len ? h_len : v_len;
-
-	cairo_move_to(cr, 0, 0);
-	cairo_rel_line_to(cr, width, 0);
-	cairo_rel_line_to(cr, 0, height);
-	cairo_rel_line_to(cr, -1 * width, 0);
-	cairo_close_path(cr);
-	cairo_set_source_rgb(cr, 0, 0, 0);
-	cairo_fill(cr);
-
-	x_offset = 0;
-	y_offset = conf->seg_wt;
-
-	draw_centered_text(cr, "COORDINATED UNIVERSAL TIME", width / 2,
-			   y_offset, conf);
-	y_offset += title_extents.height + conf->seg_wt;
-
-	draw_clock(cr, y_offset, g_date_time_get_hour(utc), g_date_time_get_minute(utc), g_date_time_get_second(utc), conf);
-	y_offset += conf->__height + conf->seg_wt;
-
-    draw_hms_labels(cr, y_offset, conf);
-	y_offset += hms_extents.height;
-	y_offset += conf->seg_wt;
-
-	local_clock_config.__height = conf->__height;
-	local_clock_config.__width = conf->__width;
-	local_clock_config.__seg_len = conf->__seg_len;
-
-	draw_clock(cr, y_offset, g_date_time_get_hour(local), g_date_time_get_minute(local), g_date_time_get_second(local), &local_clock_config);
-    y_offset += conf->__height + conf->seg_wt;
-
-    draw_centered_text(cr, localtime_label->str, width / 2, y_offset, conf);
-
-    g_string_free(localtime_label, true);
+	return colon;
 }
 
-static gboolean update_clock(gpointer user_data)
+static struct ss_digit *ss_digit_create(const struct ss_geometry *geometry,
+					const struct ss_colors *colors)
 {
-    GtkWidget *utclock = user_data;
+	struct ss_digit *digit = malloc(sizeof(*digit));
 
-    gtk_widget_queue_draw(utclock);
+	digit->geometry = geometry;
+	digit->colors = colors;
+	digit->value = 0;
 
-    GDateTime *now = g_date_time_new_now_utc();
-    int millis = g_date_time_get_microsecond(now) / 1000;
-    int to_go = 1000 - millis + 1;
-    // 1ms buffer makes sure we are squarely in the next second next time we update
-    // nobody will notice
+	digit->drawing_area = gtk_drawing_area_new();
+	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(digit->drawing_area),
+				       ss_digit_draw, digit, NULL);
+	gtk_drawing_area_set_content_height(
+		GTK_DRAWING_AREA(digit->drawing_area),
+		2 * geometry->seg_len + 6 * geometry->seg_wt);
+	gtk_drawing_area_set_content_width(
+		GTK_DRAWING_AREA(digit->drawing_area),
+		geometry->seg_len + 4 * geometry->seg_wt);
 
-    g_timeout_add(to_go, update_clock, utclock);
+	return digit;
+}
 
-    return FALSE;
+static GtkWidget *create_formatted_label(const char *text,
+					 const struct text_config *config)
+{
+	GString *str = g_string_new("");
+	g_string_printf(str, "<span size=\"%d\">%s</span>", config->text_pt,
+			text);
+
+	GtkWidget *label = gtk_label_new(str->str);
+	gtk_label_set_use_markup(GTK_LABEL(label), true);
+
+	g_string_free(str, true);
+
+	return label;
+}
+
+static void create_clock(GtkWidget *grid, struct ss_clock *clock,
+			 const struct ss_geometry *geometry,
+			 const struct ss_colors *colors, int row)
+{
+	for (int i = 0; i < 6; i++)
+		clock->digits[i] = ss_digit_create(geometry, colors);
+	for (int i = 0; i < 2; i++)
+		clock->colons[i] = ss_colon_create(geometry, &colors->on);
+
+	gtk_grid_attach(GTK_GRID(grid), clock->digits[0]->drawing_area, 0, row,
+			1, 1);
+	gtk_grid_attach(GTK_GRID(grid), clock->digits[1]->drawing_area, 1, row,
+			1, 1);
+
+	gtk_grid_attach(GTK_GRID(grid), clock->colons[0]->drawing_area, 2, row,
+			1, 1);
+
+	gtk_grid_attach(GTK_GRID(grid), clock->digits[2]->drawing_area, 3, row,
+			1, 1);
+	gtk_grid_attach(GTK_GRID(grid), clock->digits[3]->drawing_area, 4, row,
+			1, 1);
+
+	gtk_grid_attach(GTK_GRID(grid), clock->colons[1]->drawing_area, 5, row,
+			1, 1);
+
+	gtk_grid_attach(GTK_GRID(grid), clock->digits[4]->drawing_area, 6, row,
+			1, 1);
+	gtk_grid_attach(GTK_GRID(grid), clock->digits[5]->drawing_area, 7, row,
+			1, 1);
+}
+
+static struct clockapp *clockapp_create(const struct config *config, int width,
+					int height)
+{
+	int grid_height;
+	struct clockapp *app = malloc(sizeof(*app));
+	app->grid = gtk_grid_new();
+
+	app->geometry.seg_wt = config->seg_wt;
+	app->geometry.border_wt = config->border_wt;
+
+	app->prev_utc_offset = 25; // force an update of the time offset message
+
+	app->l_utc = create_formatted_label("COORDINATED UNIVERSAL TIME",
+					    &config->labels);
+	gtk_grid_attach(GTK_GRID(app->grid), app->l_utc, 0, 0, 8, 1);
+
+	app->l_hours = create_formatted_label("HOURS", &config->labels);
+	gtk_grid_attach(GTK_GRID(app->grid), app->l_hours, 0, 2, 2, 1);
+
+	app->l_minutes = create_formatted_label("MINUTES", &config->labels);
+	gtk_grid_attach(GTK_GRID(app->grid), app->l_minutes, 3, 2, 2, 1);
+
+	app->l_seconds = create_formatted_label("SECONDS", &config->labels);
+	gtk_grid_attach(GTK_GRID(app->grid), app->l_seconds, 6, 2, 2, 1);
+
+	app->l_local = create_formatted_label("LOCAL TIME", &config->labels);
+	gtk_grid_attach(GTK_GRID(app->grid), app->l_local, 0, 4, 8, 1);
+
+	gtk_grid_set_column_spacing(GTK_GRID(app->grid), app->geometry.seg_wt);
+
+	gtk_widget_measure(app->grid, GTK_ORIENTATION_VERTICAL, -1, NULL,
+			   &grid_height, NULL, NULL);
+
+	app->geometry.seg_len =
+		(height - grid_height - 12 * app->geometry.seg_wt) / 4;
+
+	create_clock(app->grid, &app->utc, &app->geometry, &app_config.c_utc,
+		     1);
+
+	create_clock(app->grid, &app->local, &app->geometry,
+		     &app_config.c_local, 3);
+
+	return app;
 }
 
 static void on_activate(GtkApplication *app, gpointer user_data)
@@ -300,16 +387,19 @@ static void on_activate(GtkApplication *app, gpointer user_data)
 	gtk_window_set_title(GTK_WINDOW(window), "utc-clock");
 	//gtk_window_set_decorated(GTK_WINDOW(window), false);
 	//gtk_window_maximize(GTK_WINDOW(window));
-    gtk_window_fullscreen(GTK_WINDOW(window));
+	gtk_window_fullscreen(GTK_WINDOW(window));
 
-	GtkWidget *utclock = gtk_drawing_area_new();
-	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(utclock), draw, NULL,
-				       NULL);
-	gtk_window_set_child(GTK_WINDOW(window), GTK_WIDGET(utclock));
+	struct clockapp *clock =
+		clockapp_create(&app_config, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+	GtkWidget *centerbox = gtk_center_box_new();
+	gtk_center_box_set_center_widget(GTK_CENTER_BOX(centerbox),
+					 clock->grid);
+	gtk_window_set_child(GTK_WINDOW(window), centerbox);
 
 	gtk_window_present(GTK_WINDOW(window));
 
-    g_timeout_add(500, update_clock, utclock);
+	g_timeout_add(0, update_clock, clock);
 }
 
 int main(int argc, char **argv, char **envp)
